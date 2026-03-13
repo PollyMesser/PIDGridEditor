@@ -1,5 +1,5 @@
 import "./App.css";
-import { useState, useCallback, useMemo, useRef } from "react";
+import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 
 // ============================================================
 // CONTROL DEFINITIONS
@@ -113,7 +113,8 @@ export default function App() {
 
   const [tool, setTool] = useState("pipe");
   const [variantVal, setVariantVal] = useState(0);
-  const [selected, setSelected] = useState(null);
+  const [selected, setSelected] = useState(null);        // single primary selection (for props panel)
+  const [multiSel, setMultiSel] = useState(new Set());    // multi-selection set of IDs
   const [counters, setCounters] = useState({});
   const [showCode, setShowCode] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -125,16 +126,13 @@ export default function App() {
   const [dragPreview, setDragPreview] = useState(null);
   const gridRef = useRef(null);
 
-  // ============================================================
-  // PIPELINE GROUPS
-  // ============================================================
+  // Pipeline groups
   const [pipelines, setPipelines] = useState([]);
-  // { name: "FeedLine1", color: "#3B82F6", activeColor: "#22D3EE" }
   const [showPipelinePanel, setShowPipelinePanel] = useState(false);
   const [newPipelineName, setNewPipelineName] = useState("");
   const [newPipelineColor, setNewPipelineColor] = useState("#3B82F6");
   const [newPipelineActiveColor, setNewPipelineActiveColor] = useState("#22D3EE");
-  const [activePipeline, setActivePipeline] = useState(null); // aktuell ausgewählte Pipeline zum Zuweisen
+  const [activePipeline, setActivePipeline] = useState(null);
 
   const def = CONTROL_DEFS[tool];
 
@@ -144,6 +142,111 @@ export default function App() {
     else setFgCells(val);
   }, []);
 
+  // ============================================================
+  // Selection helpers
+  // ============================================================
+  // All IDs in current selection (multiSel + selected)
+  const allSelected = useMemo(() => {
+    const s = new Set(multiSel);
+    if (selected) s.add(selected);
+    return s;
+  }, [selected, multiSel]);
+
+  const isSelected = useCallback((id) => allSelected.has(id), [allSelected]);
+
+  const clearSelection = useCallback(() => {
+    setSelected(null);
+    setMultiSel(new Set());
+  }, []);
+
+  // Click on a control: normal=single select, shift/ctrl=toggle in multi
+  const handleSelectClick = useCallback((e, id) => {
+    if (e.shiftKey || e.ctrlKey || e.metaKey) {
+      // Multi-select toggle
+      setMultiSel((prev) => {
+        const next = new Set(prev);
+        // If clicking on the primary selected, add it to multi and clear primary
+        if (selected && !next.has(selected)) next.add(selected);
+        if (next.has(id)) {
+          next.delete(id);
+          // If we removed the primary, pick another or null
+          if (selected === id) setSelected(next.size > 0 ? [...next][0] : null);
+        } else {
+          next.add(id);
+          setSelected(id); // primary follows last click
+        }
+        return next;
+      });
+    } else {
+      // Normal single select
+      setSelected((prev) => prev === id ? null : id);
+      setMultiSel(new Set());
+    }
+  }, [selected]);
+
+  // ============================================================
+  // Keyboard: Delete / Entf
+  // ============================================================
+  const findEntry = useCallback((id) => {
+    for (const c of Object.values(bgCells)) {
+      if (c.isOrigin && c.ref === id) return { layer: "bg", entry: c.entry };
+    }
+    for (const c of Object.values(fgCells)) {
+      if (c.isOrigin && c.ref === id) return { layer: "fg", entry: c.entry };
+    }
+    return null;
+  }, [bgCells, fgCells]);
+
+  const deleteControl = useCallback((id) => {
+    const found = findEntry(id);
+    if (!found) return;
+    const cells = found.layer === "bg" ? bgCells : fgCells;
+    const nc = {};
+    Object.entries(cells).forEach(([k, v]) => { if (v.ref !== id) nc[k] = v; });
+    setCellsForLayer(found.layer, nc);
+  }, [bgCells, fgCells, findEntry, setCellsForLayer]);
+
+  const deleteSelected = useCallback(() => {
+    const ids = [...allSelected];
+    if (ids.length === 0) return;
+    // Group by layer to do fewer state updates
+    let newBg = bgCells, newFg = fgCells;
+    let bgChanged = false, fgChanged = false;
+    ids.forEach((id) => {
+      const found = findEntry(id);
+      if (!found) return;
+      if (found.layer === "bg") {
+        if (!bgChanged) { newBg = { ...newBg }; bgChanged = true; }
+        Object.keys(newBg).forEach((k) => { if (newBg[k].ref === id) delete newBg[k]; });
+      } else {
+        if (!fgChanged) { newFg = { ...newFg }; fgChanged = true; }
+        Object.keys(newFg).forEach((k) => { if (newFg[k].ref === id) delete newFg[k]; });
+      }
+    });
+    if (bgChanged) setBgCells(newBg);
+    if (fgChanged) setFgCells(newFg);
+    clearSelection();
+  }, [allSelected, bgCells, fgCells, findEntry, clearSelection]);
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "Delete" || e.key === "Backspace") {
+        // Don't trigger when typing in inputs
+        const tag = e.target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        if (allSelected.size > 0) {
+          e.preventDefault();
+          deleteSelected();
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [allSelected, deleteSelected]);
+
+  // ============================================================
+  // Tool / variant selection
+  // ============================================================
   const selectTool = useCallback((key) => {
     setTool(key);
     const d = CONTROL_DEFS[key];
@@ -202,7 +305,6 @@ export default function App() {
   }, [newPipelineName, newPipelineColor, newPipelineActiveColor, pipelines]);
 
   const removePipeline = useCallback((name) => {
-    // Entferne Pipeline-Zuordnung von allen Pipes
     const nc = { ...bgCells };
     Object.entries(nc).forEach(([k, c]) => {
       if (c.entry?.extras?.pipeline === name) {
@@ -220,23 +322,6 @@ export default function App() {
     setPipelines((prev) => prev.map((p) => p.name === name ? { ...p, [field]: value } : p));
   }, []);
 
-  const renamePipeline = useCallback((oldName, newName) => {
-    newName = newName.trim();
-    if (!newName || newName === oldName) return;
-    if (pipelines.some((p) => p.name === newName)) { alert("Name bereits vergeben."); return; }
-    setPipelines((prev) => prev.map((p) => p.name === oldName ? { ...p, name: newName } : p));
-    // Update alle Pipe-Zuordnungen
-    const nc = { ...bgCells };
-    Object.entries(nc).forEach(([k, c]) => {
-      if (c.entry?.extras?.pipeline === oldName) {
-        nc[k] = { ...c, entry: { ...c.entry, extras: { ...c.entry.extras, pipeline: newName } } };
-      }
-    });
-    setBgCells(nc);
-    if (activePipeline === oldName) setActivePipeline(newName);
-  }, [bgCells, pipelines, activePipeline]);
-
-  // Pipe einer Pipeline zuweisen/entfernen
   const assignPipeline = useCallback((pipeId, pipelineName) => {
     const nc = { ...bgCells };
     Object.entries(nc).forEach(([k, c]) => {
@@ -253,7 +338,27 @@ export default function App() {
     setBgCells(nc);
   }, [bgCells]);
 
-  // Pipes einer bestimmten Pipeline
+  // Assign pipeline to ALL currently selected pipes
+  const assignPipelineToSelection = useCallback((pipelineName) => {
+    const nc = { ...bgCells };
+    let changed = false;
+    allSelected.forEach((id) => {
+      Object.entries(nc).forEach(([k, c]) => {
+        if (c.ref === id && c.entry?.type === "pipe") {
+          const newExtras = { ...c.entry.extras };
+          if (pipelineName) {
+            newExtras.pipeline = pipelineName;
+          } else {
+            delete newExtras.pipeline;
+          }
+          nc[k] = { ...c, entry: { ...c.entry, extras: newExtras } };
+          changed = true;
+        }
+      });
+    });
+    if (changed) setBgCells(nc);
+  }, [bgCells, allSelected]);
+
   const pipesInPipeline = useCallback((pipelineName) => {
     const ids = new Set();
     Object.values(bgCells).forEach((c) => {
@@ -261,16 +366,6 @@ export default function App() {
     });
     return ids;
   }, [bgCells]);
-
-  // Pipeline-Farbe für eine Pipe
-  const getPipelineForPipe = useCallback((pipeId) => {
-    for (const c of Object.values(bgCells)) {
-      if (c.isOrigin && c.ref === pipeId && c.entry?.extras?.pipeline) {
-        return pipelines.find((p) => p.name === c.entry.extras.pipeline) || null;
-      }
-    }
-    return null;
-  }, [bgCells, pipelines]);
 
   // ============================================================
   // Place control
@@ -299,8 +394,6 @@ export default function App() {
 
     const extras = {};
     if (hmiIndex !== undefined) extras["hmi-index"] = hmiIndex;
-
-    // Auto-assign pipeline wenn Pipe + aktive Pipeline
     if (tool === "pipe" && activePipeline) {
       extras.pipeline = activePipeline;
     }
@@ -314,27 +407,8 @@ export default function App() {
 
     setCellsForLayer(layer, cells);
     setSelected(id);
+    setMultiSel(new Set());
   }, [bgCells, fgCells, tool, variantVal, counters, dragging, isAreaFree, nextFreeHmiIndex, setCellsForLayer, activePipeline]);
-
-  const findEntry = useCallback((id) => {
-    for (const c of Object.values(bgCells)) {
-      if (c.isOrigin && c.ref === id) return { layer: "bg", entry: c.entry };
-    }
-    for (const c of Object.values(fgCells)) {
-      if (c.isOrigin && c.ref === id) return { layer: "fg", entry: c.entry };
-    }
-    return null;
-  }, [bgCells, fgCells]);
-
-  const deleteControl = useCallback((id) => {
-    const found = findEntry(id);
-    if (!found) return;
-    const cells = found.layer === "bg" ? bgCells : fgCells;
-    const nc = {};
-    Object.entries(cells).forEach(([k, v]) => { if (v.ref !== id) nc[k] = v; });
-    setCellsForLayer(found.layer, nc);
-    if (selected === id) setSelected(null);
-  }, [bgCells, fgCells, selected, findEntry, setCellsForLayer]);
 
   const updateVariant = useCallback((id, val) => {
     const found = findEntry(id);
@@ -395,12 +469,15 @@ export default function App() {
     const cellPos = getCellFromEvent(e);
     if (!cellPos) return;
     setDragging({ id, offsetCol: cellPos.col - entry.col, offsetRow: cellPos.row - entry.row, w: entry.w, h: entry.h, layer: getLayer(entry.type) });
-    setSelected(id);
+    if (!allSelected.has(id)) {
+      setSelected(id);
+      setMultiSel(new Set());
+    }
     const img = new Image();
     img.src = "data:image/gif;base64,R0lGODlhAQABAIAAAAUEBAAAACwAAAAAAQABAAACAkQBADs=";
     e.dataTransfer.setDragImage(img, 0, 0);
     e.dataTransfer.effectAllowed = "move";
-  }, [getCellFromEvent]);
+  }, [getCellFromEvent, allSelected]);
 
   const handleDragOver = useCallback((e) => {
     e.preventDefault();
@@ -443,6 +520,17 @@ export default function App() {
   const selEntry = placedControls.find((e) => e.id === selected);
   const hasValveAuto = placedControls.some((e) => e.type === "valve_auto");
 
+  // Multi-selection info
+  const multiSelCount = allSelected.size;
+  const multiSelPipeCount = useMemo(() => {
+    let n = 0;
+    allSelected.forEach((id) => {
+      const f = findEntry(id);
+      if (f && f.entry.type === "pipe") n++;
+    });
+    return n;
+  }, [allSelected, findEntry]);
+
   // ============================================================
   // Code generation
   // ============================================================
@@ -451,7 +539,6 @@ export default function App() {
     const bgControls = placedControls.filter((e) => getLayer(e.type) === "bg");
     const fgControls = placedControls.filter((e) => getLayer(e.type) === "fg");
 
-    // Pipeline-Kommentar-Block
     if (pipelines.length > 0) {
       lines.push("<!-- ========== Pipeline-Gruppen (Referenz) ========== -->");
       lines.push("<!--");
@@ -467,7 +554,6 @@ export default function App() {
       lines.push("");
     }
 
-    // Pipeline-Config als Script-Block (für Runtime-Nutzung)
     if (pipelines.length > 0) {
       const pipelineConfig = {};
       pipelines.forEach((p) => {
@@ -475,11 +561,7 @@ export default function App() {
         Object.values(bgCells).forEach((c) => {
           if (c.isOrigin && c.entry?.extras?.pipeline === p.name) pipeIds.push(c.ref);
         });
-        pipelineConfig[p.name] = {
-          color: p.color,
-          activeColor: p.activeColor,
-          pipes: pipeIds,
-        };
+        pipelineConfig[p.name] = { color: p.color, activeColor: p.activeColor, pipes: pipeIds };
       });
       lines.push(`<script id="PipelineConfig" type="application/json">`);
       lines.push(JSON.stringify(pipelineConfig, null, 2));
@@ -521,12 +603,7 @@ export default function App() {
     ];
     if (zIndex !== undefined) attrs.push(`data-tchmi-zindex="${zIndex}"`);
     if (d.property && e.variant !== null) attrs.push(`data-tchmi-${d.property}="${e.variant}"`);
-
-    // Pipeline-Attribut
-    if (e.extras?.pipeline) {
-      attrs.push(`data-tchmi-pipeline="${e.extras.pipeline}"`);
-    }
-
+    if (e.extras?.pipeline) attrs.push(`data-tchmi-pipeline="${e.extras.pipeline}"`);
     if (d.extraProps) {
       d.extraProps.forEach((ep) => {
         if (ep.type === "color" || ep.attr === "hmi-index") return;
@@ -548,8 +625,6 @@ export default function App() {
         }
       }
     }
-
-    // Pipeline-Farbe als PipeColor Script-Block
     if (e.type === "pipe" && e.extras?.pipeline) {
       const pl = pipelines.find((p) => p.name === e.extras.pipeline);
       if (pl) {
@@ -557,7 +632,6 @@ export default function App() {
         scriptBlock += `\n<script data-tchmi-target-attribute="data-tchmi-pipecolor" type="application/json">\n{\n  "color": "${rgba}"\n}\n</script>\n`;
       }
     }
-
     return `<div ${attrs.join("\n     ")}>${scriptBlock}</div>`;
   }
 
@@ -576,18 +650,13 @@ export default function App() {
     const ucToKey = {};
     Object.entries(CONTROL_DEFS).forEach(([key, d]) => { ucToKey[d.userControl] = key; });
 
-    // Pipeline-Config importieren
     const scriptEl = doc.querySelector('#PipelineConfig');
     let importedPipelines = [];
     if (scriptEl) {
       try {
         const pConfig = JSON.parse(scriptEl.textContent);
         Object.entries(pConfig).forEach(([name, cfg]) => {
-          importedPipelines.push({
-            name,
-            color: cfg.color || "#3B82F6",
-            activeColor: cfg.activeColor || "#22D3EE",
-          });
+          importedPipelines.push({ name, color: cfg.color || "#3B82F6", activeColor: cfg.activeColor || "#22D3EE" });
         });
       } catch (e) {}
     }
@@ -630,12 +699,9 @@ export default function App() {
       }
 
       const extras = {};
-
-      // Pipeline-Zuordnung importieren
       const pipelineAttr = host.getAttribute("data-tchmi-pipeline");
       if (pipelineAttr) {
         extras.pipeline = pipelineAttr;
-        // Pipeline auto-erstellen falls nicht in Config
         if (!importedPipelines.some((p) => p.name === pipelineAttr)) {
           importedPipelines.push({ name: pipelineAttr, color: "#3B82F6", activeColor: "#22D3EE" });
         }
@@ -688,14 +754,14 @@ export default function App() {
     setFgCells(newFg);
     setCounters(newCounters);
     setPipelines(importedPipelines);
-    setSelected(null);
+    clearSelection();
 
     let msg = imported + " Controls importiert.";
     if (importedPipelines.length > 0) msg += " " + importedPipelines.length + " Pipelines importiert.";
     if (skipped > 0) msg += " " + skipped + " übersprungen.";
     if (errors.length > 0) msg += "\n" + errors.join("\n");
     setImportMsg({ type: skipped > 0 ? "warn" : "success", text: msg });
-  }, [importText]);
+  }, [importText, clearSelection]);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(generateCode()).then(() => {
@@ -745,7 +811,7 @@ export default function App() {
             style={showImport ? { background: "rgba(99,179,237,0.13)" } : {}}>
             {showImport ? "Grid anzeigen" : "Code importieren"}
           </button>
-          <button className="btn-del" onClick={() => { setBgCells({}); setFgCells({}); setCounters({}); setSelected(null); setPipelines([]); setActivePipeline(null); }}>
+          <button className="btn-del" onClick={() => { setBgCells({}); setFgCells({}); setCounters({}); clearSelection(); setPipelines([]); setActivePipeline(null); }}>
             Alles löschen
           </button>
         </div>
@@ -805,11 +871,11 @@ export default function App() {
             <button className="pipeline-add-btn" onClick={addPipeline}>+</button>
           </div>
           {pipelines.length > 0 && !activePipeline && (
-            <div className="pipeline-hint">Klicke auf eine Pipeline um sie zu aktivieren. Neue Pipes werden dann automatisch zugewiesen.</div>
+            <div className="pipeline-hint">Klicke auf eine Pipeline um sie zu aktivieren. Neue Pipes werden automatisch zugewiesen.</div>
           )}
           {activePipeline && (
             <div className="pipeline-hint pipeline-hint-active">
-              Neue Pipes werden automatisch der Pipeline „{activePipeline}" zugewiesen. Im Properties-Panel kannst du die Zuordnung einzelner Pipes ändern.
+              Neue Pipes werden automatisch der Pipeline „{activePipeline}" zugewiesen. Mehrere Pipes mit Shift/Strg markieren und im Properties-Panel zuweisen.
             </div>
           )}
         </div>
@@ -853,7 +919,7 @@ export default function App() {
                 onChange={(e) => setImportText(e.target.value)}
                 placeholder={'TcHmi Content-Page HTML hier einfügen...'} spellCheck={false} />
               <div className="import-hint">
-                Unterstützte Controls: {Object.values(CONTROL_DEFS).map(d => d.label).join(", ")}. Pipeline-Zuordnungen (data-tchmi-pipeline) und PipelineConfig-Block werden mit importiert.
+                Unterstützte Controls: {Object.values(CONTROL_DEFS).map(d => d.label).join(", ")}. Pipeline-Zuordnungen und PipelineConfig werden mit importiert.
               </div>
             </div>
           ) : showCode ? (
@@ -880,7 +946,11 @@ export default function App() {
           ) : (
             <div className="grid-container" ref={gridRef}
               style={{ width: COLS * S, height: ROWS * S }}
-              onDragOver={handleDragOver} onDrop={handleDrop}>
+              onDragOver={handleDragOver} onDrop={handleDrop}
+              onClick={(e) => {
+                // Click on empty area without modifier → clear selection
+                if (e.target === gridRef.current || e.target.classList.contains("cell-empty")) return;
+              }}>
 
               {/* Grid lines */}
               <svg width={COLS * S} height={ROWS * S} style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none" }}>
@@ -910,31 +980,31 @@ export default function App() {
                   if (!cell || !cell.isOrigin) return null;
                   const e = cell.entry;
                   const cd = CONTROL_DEFS[e.type];
-                  const isSel = selected === e.id;
+                  const isSel = isSelected(e.id);
+                  const isPrimary = selected === e.id;
                   const isDragged = dragging && dragging.id === e.id;
                   const currentToolLayer = CONTROL_DEFS[tool]?.layer;
 
-                  // Pipeline-Farbe bestimmen
                   const pl = e.extras?.pipeline ? pipelines.find((p) => p.name === e.extras.pipeline) : null;
                   const cellColor = pl ? pl.color : cd.color;
                   const plHighlight = pl && activePipeline === pl.name;
 
                   return (
                     <div key={`bg-${k}`}
-                      className={`cell-placed cell-bg ${isSel ? "selected" : ""} ${isDragged ? "dragging" : ""} ${plHighlight ? "pipeline-highlight" : ""}`}
+                      className={`cell-placed cell-bg ${isSel ? "selected" : ""} ${isPrimary ? "primary" : ""} ${isDragged ? "dragging" : ""} ${plHighlight ? "pipeline-highlight" : ""}`}
                       draggable onDragStart={(ev) => handleDragStart(ev, e.id, e)} onDragEnd={handleDragEnd}
                       onClick={(ev) => {
                         ev.stopPropagation();
-                        if (currentToolLayer === "fg") {
+                        if (currentToolLayer === "fg" && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
                           placeControl(c, r);
                         } else {
-                          setSelected(isSel ? null : e.id);
+                          handleSelectClick(ev, e.id);
                         }
                       }}
                       style={{
                         left: c * S, top: r * S, width: e.w * S, height: e.h * S,
-                        background: cellColor + (plHighlight ? "55" : "33"),
-                        border: isSel ? "2px solid #fff" : plHighlight ? `2px solid ${cellColor}` : `1px solid ${cellColor}44`,
+                        background: cellColor + (isSel ? "55" : plHighlight ? "55" : "33"),
+                        border: isPrimary ? "2px solid #fff" : isSel ? `2px solid ${cellColor}` : plHighlight ? `2px solid ${cellColor}` : `1px solid ${cellColor}44`,
                         zIndex: 1,
                       }}>
                       <span className="cell-sym" style={{ fontSize: 18 }}>{cd.render(e.variant, e)}</span>
@@ -953,7 +1023,8 @@ export default function App() {
                   if (!cell || !cell.isOrigin) return null;
                   const e = cell.entry;
                   const cd = CONTROL_DEFS[e.type];
-                  const isSel = selected === e.id;
+                  const isSel = isSelected(e.id);
+                  const isPrimary = selected === e.id;
                   const isDragged = dragging && dragging.id === e.id;
                   const fs = e.w > 1 || e.h > 1 ? 22 : 18;
                   const currentToolLayer = CONTROL_DEFS[tool]?.layer;
@@ -965,20 +1036,20 @@ export default function App() {
 
                   return (
                     <div key={`fg-${k}`}
-                      className={`cell-placed cell-fg ${isSel ? "selected" : ""} ${isDragged ? "dragging" : ""}`}
+                      className={`cell-placed cell-fg ${isSel ? "selected" : ""} ${isPrimary ? "primary" : ""} ${isDragged ? "dragging" : ""}`}
                       draggable onDragStart={(ev) => handleDragStart(ev, e.id, e)} onDragEnd={handleDragEnd}
                       onClick={(ev) => {
                         ev.stopPropagation();
-                        if (currentToolLayer === "bg") {
+                        if (currentToolLayer === "bg" && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
                           placeControl(c, r);
                         } else {
-                          setSelected(isSel ? null : e.id);
+                          handleSelectClick(ev, e.id);
                         }
                       }}
                       style={{
                         left: c * S, top: r * S, width: e.w * S, height: e.h * S,
-                        background: cd.color + "55",
-                        border: isSel ? "2px solid #fff" : `1px solid ${cd.color}88`,
+                        background: cd.color + (isSel ? "77" : "55"),
+                        border: isPrimary ? "2px solid #fff" : isSel ? `2px solid ${cd.color}` : `1px solid ${cd.color}88`,
                         zIndex: 2,
                       }}>
                       <span className="cell-sym" style={{ fontSize: fs }}>{cd.render(e.variant, e)}</span>
@@ -995,7 +1066,12 @@ export default function App() {
               {Array.from({ length: ROWS }, (_, r) =>
                 Array.from({ length: COLS }, (_, c) => (
                   <div key={`empty-${c},${r}`} className="cell-empty"
-                    onClick={() => placeControl(c, r)}
+                    onClick={(ev) => {
+                      if (!ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
+                        clearSelection();
+                        placeControl(c, r);
+                      }
+                    }}
                     style={{ left: c * S, top: r * S, width: S, height: S, zIndex: 0 }} />
                 ))
               )}
@@ -1006,7 +1082,36 @@ export default function App() {
         {/* PROPERTIES PANEL */}
         {!showCode && !showImport && (
           <div className="props">
-            {selEntry ? (() => {
+            {/* Multi-selection actions bar */}
+            {multiSelCount > 1 && (
+              <div className="multi-sel-bar">
+                <div className="multi-sel-title">{multiSelCount} Controls markiert</div>
+                {multiSelPipeCount > 0 && pipelines.length > 0 && (
+                  <div className="multi-sel-section">
+                    <div className="props-label">Pipeline zuweisen ({multiSelPipeCount} Pipes):</div>
+                    <select className="props-select"
+                      value=""
+                      onChange={(e) => {
+                        assignPipelineToSelection(e.target.value || null);
+                        e.target.value = "";
+                      }}>
+                      <option value="">– Auswählen –</option>
+                      <option value="">(keine Pipeline)</option>
+                      {pipelines.map((p) => (
+                        <option key={p.name} value={p.name}>{p.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                <button className="props-del-btn" onClick={deleteSelected}>
+                  {multiSelCount} Controls löschen
+                </button>
+                <div className="multi-sel-hint">Entf drücken zum Löschen</div>
+              </div>
+            )}
+
+            {/* Single selection props (shown for primary) */}
+            {selEntry && multiSelCount <= 1 ? (() => {
               const cd = CONTROL_DEFS[selEntry.type];
               const layerLabel = cd.layer === "bg" ? "Hintergrund" : "Vordergrund";
               const isPipe = selEntry.type === "pipe";
@@ -1029,7 +1134,6 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Pipeline-Zuordnung (nur für Pipes) */}
                   {isPipe && (
                     <div style={{ marginBottom: 10 }}>
                       <div className="props-label">Pipeline-Gruppe:</div>
@@ -1086,10 +1190,11 @@ export default function App() {
                   <div className="props-pos">
                     Position: left={selEntry.col * CELL}, top={selEntry.row * CELL}
                   </div>
-                  <button className="props-del-btn" onClick={() => deleteControl(selEntry.id)}>Löschen</button>
+                  <button className="props-del-btn" onClick={() => { deleteControl(selEntry.id); clearSelection(); }}>Löschen</button>
+                  <div className="props-shortcut-hint">Entf = Löschen · Shift/Strg+Klick = Mehrfachauswahl</div>
                 </>
               );
-            })() : (
+            })() : multiSelCount <= 1 && (
               <>
                 <div className="props-hint">
                   <p>Klicke auf eine Zelle, um <strong style={{ color: def.color }}>{def.label}</strong> zu platzieren.</p>
@@ -1102,6 +1207,7 @@ export default function App() {
                   )}
                   {tool === "valve_auto" && <p style={{ color: "#E86838", fontSize: 12 }}>arrHMI-Index wird automatisch vergeben. ID = VA_N.</p>}
                   <p>Drag & Drop um Controls zu verschieben.</p>
+                  <p style={{ color: "#666", fontSize: 11 }}>Shift/Strg+Klick = Mehrfachauswahl · Entf = Löschen</p>
                 </div>
                 {placedControls.length > 0 && (
                   <div className="placed-list">
@@ -1110,8 +1216,9 @@ export default function App() {
                       const cd = CONTROL_DEFS[e.type];
                       const pl = e.extras?.pipeline ? pipelines.find(p => p.name === e.extras.pipeline) : null;
                       return (
-                        <div key={e.id} className="placed-item"
-                          onClick={() => setSelected(e.id)} style={{ color: pl ? pl.color : cd.color }}>
+                        <div key={e.id} className={`placed-item ${isSelected(e.id) ? "placed-item-selected" : ""}`}
+                          onClick={(ev) => handleSelectClick(ev, e.id)}
+                          style={{ color: pl ? pl.color : cd.color }}>
                           {cd.layer === "bg" ? "⊡ " : ""}{cd.render(e.variant, e)} {e.id}
                           {pl && <span className="placed-item-pipeline"> [{pl.name}]</span>}
                           {e.type === "valve_auto" && e.extras["hmi-index"] !== undefined && (
