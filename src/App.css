@@ -233,6 +233,20 @@
   color: #8B5CF6;
 }
 
+/* Layer-2 Tag auf Pipe-Zellen */
+.cell-layer-tag {
+  position: absolute;
+  bottom: 1px;
+  right: 1px;
+  font-size: 8px;
+  font-weight: 700;
+  color: rgba(255,255,255,0.5);
+  line-height: 1;
+}
+.cell-bg2 {
+  border-style: dashed !important;
+}
+
 /* Pipeline tag auf Pipe-Zellen im Grid */
 .cell-pipeline-tag {
   position: absolute;
@@ -488,4 +502,27 @@
 .import-msg-error {
   background: rgba(252, 129, 129, 0.15);
   color: #fc8181;
+}
+
+/* ============================================================
+   Ergänzungen zur bestehenden App.css
+   Am Ende der Datei einfügen.
+   ============================================================ */
+
+/* JSON-Button neben dem HTML-Kopieren-Button */
+.btn-gen-json {
+  margin-left: 8px;
+  background: rgba(139, 92, 246, 0.15) !important;
+  border-color: #8B5CF6 !important;
+  color: #8B5CF6 !important;
+}
+.btn-gen-json:hover {
+  background: rgba(139, 92, 246, 0.25) !important;
+}
+
+/* JSON-Vorschau im Code-Export */
+.code-pre-json {
+  border-color: #8B5CF644 !important;
+  background: rgba(139, 92, 246, 0.05) !important;
+  max-height: 300px;
 }
